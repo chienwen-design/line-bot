@@ -20,7 +20,7 @@ app.use(express.json({
 
 app.use(express.urlencoded({ extended: true }));
 // === 基本設定 ===
-const BASE_URL = process.env.PUBLIC_BASE_URL || "https://f47d55e98170.ngrok-free.app";
+const BASE_URL = process.env.PUBLIC_BASE_URL || "https://line-bot-s9vg.onrender.com";
 const config = {
   channelSecret: process.env.CHANNEL_SECRET,
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
