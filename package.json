@@ -1,0 +1,16 @@
+{
+  "name": "line-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^7.6.0",
+    "better-sqlite3": "^12.4.1",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.1",
+    "qrcode": "^1.5.4"
+  }
+}
