@@ -249,6 +249,19 @@ function createFlexMenu(qrUrl) {
 }
 
 // === API: 會員列表 (已移除，避免公開查詢所有會員) ===
+app.get("/members", async (req, res) => {
+  try {
+    // 執行 PostgreSQL 查詢所有會員，並依加入日期倒序排列
+    const result = await pool.query("SELECT id, name, phone, line_user_id, created_at FROM members ORDER BY created_at DESC");
+    
+    // 成功回傳 JSON 格式的會員列表
+    res.json(result.rows);
+  } catch (error) {
+    console.error("查詢所有會員失敗:", error);
+    res.status(500).json({ error: "伺服器錯誤，無法取得會員列表。" });
+  }
+});
+
 
 // === API: 單一會員 (PostgreSQL) ===
 app.get("/member/:id", async (req, res) => {

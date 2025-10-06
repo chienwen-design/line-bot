@@ -1,0 +1,5 @@
+# .gitignore 內容
+/node_modules
+.env
+*.db
+*.db-*
