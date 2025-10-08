@@ -10,7 +10,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json({
-  verify: (req, res, buf) => { req.rawBody = buf; }
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  }
 }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -22,13 +24,13 @@ const config = {
 };
 const client = new Client(config);
 
-// === PostgreSQL 設定 ===
+// === PostgreSQL 資料庫設定 ===
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// === Cloudinary 設定 ===
+// === Cloudinary 雲端儲存設定 ===
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -46,8 +48,7 @@ async function initializeDatabase() {
         name VARCHAR(255),
         phone VARCHAR(255),
         qrcode TEXT,
-        waiting_for_phone BOOLEAN DEFAULT FALSE,
-        pending_phone VARCHAR(255),
+        waiting_for_phone BOOLEAN DEFAULT FALSE, -- 💥 新增狀態欄位
         created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -60,7 +61,7 @@ async function initializeDatabase() {
 
 app.get("/", (req, res) => res.send("✅ LINE Webhook + QRCode Server 已啟動 (PostgreSQL/Cloudinary)"));
 
-// === Webhook 主邏輯 ===
+// === Webhook 接收 LINE 事件 ===
 app.post("/webhook", middleware(config), async (req, res) => {
   res.sendStatus(200);
   const events = req.body.events;
@@ -75,7 +76,7 @@ app.post("/webhook", middleware(config), async (req, res) => {
   }
 });
 
-// === follow 事件 ===
+// === follow 事件：新會員加入 ===
 async function handleFollowEvent(event) {
   const userId = event.source.userId;
   const profile = await client.getProfile(userId);
@@ -115,12 +116,13 @@ async function handleFollowEvent(event) {
   ]);
 }
 
-// === 處理訊息事件 ===
+// === 處理一般文字訊息 ===
 async function handleMessage(event) {
   const userId = event.source.userId;
   const text = event.message.text.trim();
   const phoneRegex = /^09\d{8}$/;
 
+  // 查詢會員資料
   const result = await pool.query("SELECT * FROM members WHERE line_user_id = $1", [userId]);
   const member = result.rows[0];
 
@@ -129,7 +131,7 @@ async function handleMessage(event) {
     return;
   }
 
-  // === 「修改電話」觸發 ===
+  // === 功能1：使用者主動要求修改電話 ===
   if (text === "修改電話") {
     await pool.query("UPDATE members SET waiting_for_phone = true WHERE line_user_id = $1", [userId]);
     await client.replyMessage(event.replyToken, {
@@ -139,29 +141,14 @@ async function handleMessage(event) {
     return;
   }
 
-  // === 等待電話輸入中 ===
+  // === 功能2：正在等待電話輸入時 ===
   if (member.waiting_for_phone) {
     if (phoneRegex.test(text)) {
-      // 若已存在電話，先詢問是否要更新
-      if (member.phone) {
-        await pool.query("UPDATE members SET pending_phone = $1 WHERE line_user_id = $2", [text, userId]);
-        await client.replyMessage(event.replyToken, {
-          type: "template",
-          altText: "是否要更新您的電話？",
-          template: {
-            type: "confirm",
-            text: `您目前的電話為：${member.phone}\n是否要更新為：${text}？`,
-            actions: [
-              { type: "postback", label: "是", data: "confirm_update_phone_yes" },
-              { type: "postback", label: "否", data: "confirm_update_phone_no" }
-            ]
-          }
-        });
-        return;
-      }
-
-      // 沒有舊電話，直接更新並推送 Flex Menu
-      await updatePhoneAndSendMenu(userId, text, event.replyToken);
+      await pool.query("UPDATE members SET phone = $1, waiting_for_phone = false WHERE line_user_id = $2", [text, userId]);
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: `✅ 您的電話已更新為：${text}`
+      });
     } else {
       await client.replyMessage(event.replyToken, {
         type: "text",
@@ -171,151 +158,79 @@ async function handleMessage(event) {
     return;
   }
 
-  // === 非預期輸入數字時提示 ===
+  // === 功能3：一般情境輸入非指令 ===
   if (/^\d+$/.test(text)) {
     await client.replyMessage(event.replyToken, {
       type: "text",
       text: "⚠️ 若要修改電話，請輸入「修改電話」"
     });
+    return;
   }
 }
 
-// === 處理 Postback ===
+// === postback 處理 ===
 async function handlePostback(event) {
   const data = event.postback.data;
   const userId = event.source.userId;
+
   const memberResult = await pool.query("SELECT * FROM members WHERE line_user_id = $1", [userId]);
   const member = memberResult.rows[0];
 
-  if (!member) return;
-
-  // === 電話更新確認 ===
-  if (data === "confirm_update_phone_yes" && member.pending_phone) {
-    await updatePhoneAndSendMenu(userId, member.pending_phone, event.replyToken);
-    await pool.query("UPDATE members SET pending_phone = NULL WHERE line_user_id = $1", [userId]);
-    return;
-  }
-
-  if (data === "confirm_update_phone_no") {
-    await pool.query("UPDATE members SET pending_phone = NULL, waiting_for_phone = false WHERE line_user_id = $1", [userId]);
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: "❎ 已取消電話更新。"
-    });
-    return;
-  }
-
-  // === 我的 QR ===
-  if (data === "my_qr" && member.qrcode) {
-    await client.replyMessage(event.replyToken, {
-      type: "image",
-      originalContentUrl: member.qrcode,
-      previewImageUrl: member.qrcode,
-    });
-    return;
-  }
-
-  // === 我的資訊 ===
-  if (data === "my_info") {
-    const userInfo = `
+  if (data === "my_qr") {
+    if (member?.qrcode) {
+      await client.replyMessage(event.replyToken, {
+        type: "image",
+        originalContentUrl: member.qrcode,
+        previewImageUrl: member.qrcode,
+      });
+    } else {
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "⚠️ 尚未產生專屬 QR Code，請稍後再試。",
+      });
+    }
+  } else if (data === "my_info") {
+    if (member) {
+      const userInfo = `
 【我的會員資訊】
 📝 姓名: ${member.name || '未設定'}
 📞 電話: ${member.phone || '未設定'}
 🆔 會員 ID: ${member.id}
 📅 加入日期: ${new Date(member.created_at).toLocaleDateString()}
-    `.trim();
+      `.trim();
 
-    // 💡 若未設定電話，自動引導輸入
-    if (!member.phone) {
-      await pool.query("UPDATE members SET waiting_for_phone = true WHERE line_user_id = $1", [userId]);
       await client.replyMessage(event.replyToken, [
         { type: "text", text: userInfo },
-        { type: "text", text: "⚠️ 您尚未設定聯絡電話，請輸入您的電話（例如：0912345678）以完成會員資料。" }
+        { type: "text", text: "若要修改電話，請輸入「修改電話」" }
       ]);
-      return;
+    } else {
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "⚠️ 查無您的會員資訊，請嘗試重新加入或聯繫客服。",
+      });
     }
-
-    // 已有電話 → 一般顯示資訊
-    await client.replyMessage(event.replyToken, [
-      { type: "text", text: userInfo },
-      { type: "text", text: "若要修改電話，請點選下方「📞 修改電話」按鈕或輸入「修改電話」" }
-    ]);
-    return;
-  }
-
-  // === 修改電話 ===
-  if (data === "edit_phone") {
-    await pool.query("UPDATE members SET waiting_for_phone = true WHERE line_user_id = $1", [userId]);
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: "🔄 請輸入您的新聯絡電話（例如：0912345678）"
-    });
   }
 }
 
-// === 共用：更新電話並推送 Flex Menu ===
-async function updatePhoneAndSendMenu(userId, phone, replyToken) {
-  await pool.query("UPDATE members SET phone = $1, waiting_for_phone = false WHERE line_user_id = $2", [phone, userId]);
-  const updated = await pool.query("SELECT * FROM members WHERE line_user_id = $1", [userId]);
-  const updatedMember = updated.rows[0];
-  const flexMenu = createFlexMenu(updatedMember.qrcode);
+// === API: 查詢所有會員 ===
+app.get("/members", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT id, name, phone, line_user_id, created_at FROM members ORDER BY created_at DESC");
+    res.json(result.rows);
+  } catch (error) {
+    console.error("查詢所有會員失敗:", error);
+    res.status(500).json({ error: "伺服器錯誤，無法取得會員列表。" });
+  }
+});
 
-  await client.replyMessage(replyToken, [
-    { type: "text", text: `✅ 您的電話已更新為：${phone}` },
-    { type: "text", text: "以下是您的會員功能選單👇" },
-    flexMenu
-  ]);
-}
-
-// === Flex Menu（含 📞 修改電話 按鈕）===
-function createFlexMenu(qrUrl) {
-  return {
-    type: "flex",
-    altText: "會員功能選單",
-    contents: {
-      type: "bubble",
-      body: {
-        type: "box",
-        layout: "vertical",
-        spacing: "md",
-        contents: [
-          { type: "text", text: "🎯 會員功能選單", weight: "bold", size: "md", align: "center" },
-          {
-            type: "box",
-            layout: "vertical",
-            spacing: "sm",
-            contents: [
-              {
-                type: "button",
-                style: "primary",
-                color: "#FF6F61",
-                action: { type: "postback", label: "我的QR", data: "my_qr" }
-              },
-              {
-                type: "button",
-                style: "primary",
-                color: "#2D9CDB",
-                action: { type: "postback", label: "我的資訊", data: "my_info" } 
-              },
-              {
-                type: "button",
-                style: "primary",
-                color: "#27AE60",
-                action: { type: "uri", label: "加入社群", uri: "https://line.me/ti/g2/exampleCommunityLink" }
-              },
-              {
-                type: "button",
-                style: "primary",
-                color: "#F39C12",
-                action: { type: "postback", label: "📞 修改電話", data: "edit_phone" }
-              }
-            ]
-          }
-        ]
-      }
-    }
-  };
-}
+// === API: 查詢單一會員 ===
+app.get("/member/:id", async (req, res) => {
+  const { id } = req.params;
+  const memberResult = await pool.query("SELECT * FROM members WHERE id = $1", [id]);
+  const member = memberResult.rows[0];
+  if (!member) return res.status(404).json({ error: "會員不存在" });
+  res.json(member);
+});
 
 // === 啟動伺服器 ===
 initializeDatabase().then(() => {
