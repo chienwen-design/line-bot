@@ -1,4 +1,3 @@
-// === 匯入套件 ===
 import express from "express";
 import dotenv from "dotenv";
 import { Pool } from "pg";
@@ -21,7 +20,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // === 基本設定 ===
 const BASE_URL =
-  process.env.PUBLIC_BASE_URL || "https://f47d55e98170.ngrok-free.app";
+  process.env.PUBLIC_BASE_URL || "https://example.ngrok-free.app";
 const config = {
   channelSecret: process.env.CHANNEL_SECRET,
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
@@ -45,6 +44,8 @@ cloudinary.config({
 async function initializeDatabase() {
   try {
     const client = await pool.connect();
+
+    // === 會員表 ===
     await client.query(`
       CREATE TABLE IF NOT EXISTS members (
         id SERIAL PRIMARY KEY,
@@ -57,15 +58,27 @@ async function initializeDatabase() {
         created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // === 刷碼紀錄表 ===
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS scan_logs (
+        id SERIAL PRIMARY KEY,
+        member_id INTEGER REFERENCES members(id),
+        member_name VARCHAR(255),
+        scanned_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        ip_address VARCHAR(100)
+      );
+    `);
+
     client.release();
-    console.log("✅ PostgreSQL 資料表初始化成功");
+    console.log("✅ PostgreSQL 資料表初始化成功（members, scan_logs）");
   } catch (err) {
     console.error("❌ PostgreSQL 資料表初始化失敗", err);
   }
 }
 
 app.get("/", (req, res) =>
-  res.send("✅ LINE Webhook + Cloudinary Photo Upload Server 已啟動")
+  res.send("✅ LINE + Cloudinary + 掃碼系統 已啟動")
 );
 
 // === Webhook 主邏輯 ===
@@ -102,10 +115,7 @@ async function handleFollowEvent(event) {
     const memberId = insertResult.rows[0].id;
 
     const memberUrl = `${BASE_URL}/member/${memberId}`;
-    const qrCodeBuffer = await QRCode.toBuffer(memberUrl, {
-      width: 300,
-      margin: 2,
-    });
+    const qrCodeBuffer = await QRCode.toBuffer(memberUrl, { width: 300, margin: 2 });
 
     const uploadResult = await new Promise((resolve, reject) => {
       cloudinary.uploader
@@ -152,10 +162,8 @@ async function handleMessage(event) {
     const messageId = event.message.id;
 
     try {
-      // 從 LINE API 取得圖片串流
       const stream = await client.getMessageContent(messageId);
 
-      // 上傳至 Cloudinary
       const uploadResult = await new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
           {
@@ -171,7 +179,6 @@ async function handleMessage(event) {
         stream.pipe(uploadStream);
       });
 
-      // 回覆成功訊息
       await client.replyMessage(event.replyToken, {
         type: "text",
         text: `📸 照片上傳成功！\n✅ 已儲存於雲端 photo_area\n🌐 ${uploadResult.secure_url}`,
@@ -186,7 +193,6 @@ async function handleMessage(event) {
     return;
   }
 
-  // === 處理文字訊息 ===
   const text = event.message.text.trim();
   const phoneRegex = /^09\d{8}$/;
 
@@ -385,13 +391,7 @@ function createFlexMenu(qrUrl) {
         layout: "vertical",
         spacing: "md",
         contents: [
-          {
-            type: "text",
-            text: "🎯 會員功能選單",
-            weight: "bold",
-            size: "md",
-            align: "center",
-          },
+          { type: "text", text: "🎯 會員功能選單", weight: "bold", size: "md", align: "center" },
           {
             type: "box",
             layout: "vertical",
@@ -413,21 +413,13 @@ function createFlexMenu(qrUrl) {
                 type: "button",
                 style: "primary",
                 color: "#8E44AD",
-                action: {
-                  type: "message",
-                  label: "📸 上傳照片",
-                  text: "我要上傳照片",
-                },
+                action: { type: "message", label: "📸 上傳照片", text: "我要上傳照片" },
               },
               {
                 type: "button",
                 style: "primary",
                 color: "#F39C12",
-                action: {
-                  type: "postback",
-                  label: "📞 修改電話",
-                  data: "edit_phone",
-                },
+                action: { type: "postback", label: "📞 修改電話", data: "edit_phone" },
               },
             ],
           },
@@ -436,6 +428,169 @@ function createFlexMenu(qrUrl) {
     },
   };
 }
+
+// === 顯示會員身分頁面 ===
+app.get("/member/:id", async (req, res) => {
+  const memberId = req.params.id;
+  const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+
+  try {
+    const result = await pool.query("SELECT * FROM members WHERE id = $1", [memberId]);
+    const member = result.rows[0];
+
+    if (!member) {
+      res.send(`<html><body><h1>⚠️ 非會員 QR Code</h1></body></html>`);
+      return;
+    }
+
+    // 寫入刷碼紀錄
+    await pool.query(
+      "INSERT INTO scan_logs (member_id, member_name, ip_address) VALUES ($1,$2,$3)",
+      [member.id, member.name || "未設定", ip]
+    );
+
+    res.send(`
+      <html><body style="text-align:center;padding-top:50px;">
+        <h1>✅ 驗證成功</h1>
+        <p>會員姓名：${member.name}</p>
+        <p>會員編號：${member.id}</p>
+      </body></html>
+    `);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("伺服器錯誤");
+  }
+});
+
+// === 查詢 API：供掃碼槍頁面使用 ===
+app.get("/api/check-member", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ success: false, message: "缺少網址" });
+
+  try {
+    const match = url.match(/\\/member\\/(\\d+)/);
+    if (!match) return res.json({ success: false, message: "無效QR內容" });
+
+    const memberId = match[1];
+    const result = await pool.query("SELECT * FROM members WHERE id = $1", [memberId]);
+    const member = result.rows[0];
+
+    if (!member) return res.json({ success: false, message: "❌ 非會員QR Code" });
+
+    await pool.query(
+      "INSERT INTO scan_logs (member_id, member_name, ip_address) VALUES ($1,$2,$3)",
+      [member.id, member.name || "未設定", req.ip]
+    );
+
+    res.json({ success: true, name: member.name, id: member.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "伺服器錯誤" });
+  }
+});
+
+// === 掃碼器頁面 ===
+app.get("/scanner", (req, res) => {
+  res.send(`
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>會員掃碼驗證</title>
+        <style>
+          body { font-family:'Noto Sans TC',sans-serif;text-align:center;background:#f9f9f9;padding-top:100px; }
+          h1 { color:#2c3e50; }
+          input { width:80%;font-size:20px;padding:10px;margin-top:20px; }
+          .result { margin-top:30px;font-size:24px; }
+          .success { color:#2e7d32; }
+          .error { color:#c62828; }
+        </style>
+      </head>
+      <body>
+        <h1>📷 會員掃碼驗證系統</h1>
+        <p>請將游標放在輸入框內，掃描會員QR Code</p>
+        <input id="scannerInput" placeholder="請掃描QR Code..." autofocus />
+        <div class="result" id="result"></div>
+        <script>
+          const input=document.getElementById("scannerInput");
+          const resultDiv=document.getElementById("result");
+          input.addEventListener("keypress",async(e)=>{
+            if(e.key==="Enter"){
+              const url=input.value.trim();
+              if(!url)return;
+              resultDiv.innerHTML="⏳ 驗證中...";
+              const res=await fetch("/api/check-member?url="+encodeURIComponent(url));
+              const data=await res.json();
+              if(data.success){
+                resultDiv.innerHTML="✅ <span class='success'>歡迎會員："+data.name+"</span>";
+              }else{
+                resultDiv.innerHTML="❌ <span class='error'>"+data.message+"</span>";
+              }
+              input.value="";
+            }
+          });
+        </script>
+      </body>
+    </html>
+  `);
+});
+
+// === 顯示最近 50 筆刷碼紀錄 ===
+app.get("/logs", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM scan_logs ORDER BY scanned_at DESC LIMIT 50"
+    );
+    const logs = result.rows;
+
+    const rows = logs
+      .map(
+        (log) => `
+        <tr>
+          <td>${log.id}</td>
+          <td>${log.member_id}</td>
+          <td>${log.member_name}</td>
+          <td>${new Date(log.scanned_at).toLocaleString()}</td>
+          <td>${log.ip_address}</td>
+        </tr>
+      `
+      )
+      .join("");
+
+    res.send(`
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <title>刷碼紀錄查詢</title>
+          <style>
+            body { font-family: 'Noto Sans TC', sans-serif; background: #f4f6f8; padding: 40px; }
+            h1 { color: #2e7d32; text-align: center; }
+            table { width: 100%; border-collapse: collapse; background: white; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+            th, td { padding: 10px; border-bottom: 1px solid #ddd; text-align: center; }
+            th { background: #81c784; color: white; }
+            tr:hover { background-color: #f1f8e9; }
+            .refresh { text-align: center; margin-top: 20px; }
+            button { padding: 10px 20px; background: #388e3c; color: white; border: none; border-radius: 5px; cursor: pointer; }
+            button:hover { background: #2e7d32; }
+          </style>
+        </head>
+        <body>
+          <h1>📋 最近 50 筆刷碼紀錄</h1>
+          <div class="refresh">
+            <button onclick="window.location.reload()">🔄 重新整理</button>
+          </div>
+          <table>
+            <tr><th>ID</th><th>會員ID</th><th>姓名</th><th>刷碼時間</th><th>IP位址</th></tr>
+            ${rows || "<tr><td colspan='5'>尚無刷碼紀錄</td></tr>"}
+          </table>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error("❌ 無法讀取刷碼紀錄：", err);
+    res.status(500).send("伺服器錯誤，請稍後再試。");
+  }
+});
+
 
 // === 啟動伺服器 ===
 initializeDatabase().then(() => {
