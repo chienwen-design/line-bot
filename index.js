@@ -468,7 +468,7 @@ app.get("/api/check-member", async (req, res) => {
   if (!url) return res.status(400).json({ success: false, message: "缺少網址" });
 
   try {
-    const match = url.match(/\\/member\\/(\\d+)/);
+    const match = url.match(/\/member\/(\d+)/);
     if (!match) return res.json({ success: false, message: "無效QR內容" });
 
     const memberId = match[1];
