@@ -329,7 +329,7 @@ app.get("/scanner", (req, res) => {
 app.get("/api/check-member", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.json({ success: false, message: "未提供 URL" });
-  const match = url.match(/\\/member\\/(\\d+)/);
+  const match = url.match(/\/member\/(\d+)/);
   if (!match) return res.json({ success: false, message: "無效 QR Code" });
   const id = match[1];
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
