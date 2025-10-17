@@ -28,7 +28,7 @@ async function createRichMenu() {
       },
       {
         bounds: { x: 1667, y: 0, width: 833, height: 843 },
-        action: { type: "uri", uri: "https://prolactix.com/wc-56" }
+        action: { type: "postback", data: "edit_info" }
       }
     ]
   };

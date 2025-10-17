@@ -74,7 +74,7 @@ async function setupRichMenu() {
 
     const richMenu = {
       size: { width: 2500, height: 843 },
-      selected: true,
+      selected: false,
       name: "會員主選單",
       chatBarText: "會員功能",
       areas: [
@@ -246,23 +246,73 @@ async function handleMessage(event) {
     return;
   }
 
-  // === 註冊階段 ===
-  if (member.registration_step === 1 && /^09\d{8}$/.test(msgText)) {
+// === 註冊階段控制 ===
+if (member.registration_step === 1) {
+  if (/^09\d{8}$/.test(msgText)) {
+    // ✅ 正確手機格式
     await pool.query("UPDATE members SET phone=$1, registration_step=2 WHERE line_user_id=$2", [msgText, userId]);
-    await client.replyMessage(event.replyToken, { type: "text", text: "請輸入您的會員卡號（例如：A123456）" });
-    return;
+    await client.replyMessage(event.replyToken, { type: "text", text: "📱 手機號碼已登錄成功，請輸入您的會員卡號（例如：A123456）" });
+  } else {
+    await client.replyMessage(event.replyToken, { type: "text", text: "❌ 手機號格式不正確，請重新輸入（例如：0912345678）" });
   }
+  return;
+}
 
-  if (member.registration_step === 2) {
+if (member.registration_step === 2) {
+  // 卡號可用英數混合
+  if (/^[A-Za-z0-9]{5,}$/.test(msgText)) {
     await pool.query("UPDATE members SET card_number=$1, registration_step=3 WHERE line_user_id=$2", [msgText, userId]);
-    await client.replyMessage(event.replyToken, { type: "text", text: "💳 會員卡號已登錄成功，請上傳您的照片。" });
-    return;
+    await client.replyMessage(event.replyToken, { type: "text", text: "💳 會員卡號已登錄成功，請上傳您的照片以完成註冊。" });
+  } else {
+    await client.replyMessage(event.replyToken, { type: "text", text: "❌ 卡號格式不正確，請重新輸入（例如：A123456）" });
   }
+  return;
+}
 
-  if (member.registration_step === 3) {
+if (member.registration_step === 3) {
+  if (msgType === "image") {
+    // ✅ 照片上傳流程（同你目前程式）
+    const messageId = event.message.id;
+    const stream = await client.getMessageContent(messageId);
+
+    const upload = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { folder: "member_photos", public_id: `member_${member.id}_${Date.now()}` },
+        (err, result) => (err ? reject(err) : resolve(result))
+      );
+      stream.pipe(uploadStream);
+    });
+
+    const photoUrl = upload.secure_url;
+    await pool.query("UPDATE members SET photo_url=$1 WHERE line_user_id=$2", [photoUrl, userId]);
+
+    // 產生 QR Code
+    const memberUrl = `${BASE_URL}/member/${member.id}`;
+    const qrBuffer = await QRCode.toBuffer(memberUrl, { width: 300, margin: 2 });
+    const qrUpload = await new Promise((resolve, reject) => {
+      cloudinary.uploader.upload_stream(
+        { folder: "line_qrcodes", public_id: `member_${member.id}` },
+        (err, result) => (err ? reject(err) : resolve(result))
+      ).end(qrBuffer);
+    });
+
+    await pool.query("UPDATE members SET qrcode=$1, registration_step=0 WHERE id=$2", [qrUpload.secure_url, member.id]);
+    await client.replyMessage(event.replyToken, [
+      { type: "text", text: "📸 照片上傳成功！" },
+      { type: "text", text: "✅ 註冊完成！以下是您的 QR Code 👇" },
+      {
+        type: "image",
+        originalContentUrl: qrUpload.secure_url,
+        previewImageUrl: qrUpload.secure_url,
+      },
+    ]);
+  } else {
+    // 🚫 若還沒上傳照片就亂輸入文字
     await client.replyMessage(event.replyToken, { type: "text", text: "請上傳您的照片以完成註冊。" });
-    return;
   }
+  return;
+}
+
 
   // === 修改資料流程 ===
   if (member.registration_step === 10) {
