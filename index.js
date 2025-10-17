@@ -89,7 +89,7 @@ async function handleFollowEvent(event) {
   }
 
   await client.replyMessage(event.replyToken, [
-    { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
+    // { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
     { type: "text", text: "請先輸入您的手機號碼（例如：0912345678）以完成第一步。" },
   ]);
 }
