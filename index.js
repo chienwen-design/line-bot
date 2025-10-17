@@ -89,7 +89,7 @@ async function handleFollowEvent(event) {
   }
 
   await client.replyMessage(event.replyToken, [
-    // { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
+    { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
     { type: "text", text: "請先輸入您的手機號碼（例如：0912345678）以完成第一步。" },
   ]);
 }
@@ -102,6 +102,44 @@ async function handleMessageEvent(event) {
   const result = await pool.query("SELECT * FROM members WHERE line_user_id = $1", [userId]);
   const member = result.rows[0];
   if (!member) return;
+
+  // === 查詢我的資訊 ===
+  if (messageType === "text" && event.message.text.trim() === "我的資訊") {
+    if (member.registration_step === 0) {
+      const flexMessage = {
+        type: "flex",
+        altText: "我的會員資訊",
+        contents: {
+          type: "bubble",
+          hero: {
+            type: "image",
+            url: member.photo_url || "https://cdn-icons-png.flaticon.com/512/149/149071.png",
+            size: "full",
+            aspectRatio: "1:1",
+            aspectMode: "cover",
+          },
+          body: {
+            type: "box",
+            layout: "vertical",
+            contents: [
+              { type: "text", text: "👤 我的會員資料", weight: "bold", size: "lg" },
+              { type: "separator", margin: "md" },
+              { type: "text", text: `姓名：${member.name}` },
+              { type: "text", text: `電話：${member.phone}` },
+              { type: "text", text: `會員卡號：${member.card_number}` },
+            ],
+          },
+        },
+      };
+      await client.replyMessage(event.replyToken, flexMessage);
+    } else {
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "⚠️ 您尚未完成註冊，請依指示輸入資料。",
+      });
+    }
+    return;
+  }
 
   // === 📸 上傳照片階段 ===
   if (messageType === "image") {
@@ -237,118 +275,61 @@ function createFlexMenu(qrUrl) {
   };
 }
 
-// === 會員頁面 (QR Code 掃描用) ===
-app.get("/member/:id", async (req, res) => {
-  const memberId = req.params.id;
-  const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-  const result = await pool.query("SELECT * FROM members WHERE id=$1", [memberId]);
-  const member = result.rows[0];
-
-  if (!member) return res.send(`<h1>⚠️ 查無此會員</h1>`);
-
-  await pool.query(
-    "INSERT INTO scan_logs (member_id, member_name, card_number, ip_address) VALUES ($1,$2,$3,$4)",
-    [member.id, member.name, member.card_number, ip]
-  );
-
-  res.send(`
-    <html><body style="text-align:center;padding-top:50px;">
-      <h1>✅ 會員驗證成功</h1>
-      <p>姓名：${member.name}</p>
-      <p>電話：${member.phone}</p>
-      <p>會員卡號：${member.card_number}</p>
-      <img src="${member.photo_url}" width="200" style="border-radius:10px;margin-top:10px;">
-    </body></html>
-  `);
-});
-
-// === 刷碼紀錄頁面 ===
-app.get("/logs", async (req, res) => {
-  const result = await pool.query(
-    "SELECT * FROM scan_logs ORDER BY scanned_at DESC LIMIT 50"
-  );
-  const rows = result.rows
-    .map(
-      (r) => `
-        <tr>
-          <td>${r.id}</td>
-          <td>${r.member_name}</td>
-          <td>${r.card_number}</td>
-          <td>${new Date(r.scanned_at).toLocaleString()}</td>
-          <td>${r.ip_address}</td>
-        </tr>`
-    )
-    .join("");
-  res.send(`
-    <html><head><meta charset="utf-8"><title>刷碼紀錄</title>
-    <style>
-      body{font-family:'Noto Sans TC';background:#f4f6f8;padding:40px;}
-      h1{text-align:center;color:#2e7d32;}
-      table{width:100%;border-collapse:collapse;background:white;}
-      th,td{padding:10px;border-bottom:1px solid #ddd;text-align:center;}
-      th{background:#81c784;color:white;}
-      tr:hover{background:#f1f8e9;}
-    </style></head>
-    <body>
-      <h1>📋 最近 50 筆刷碼紀錄</h1>
-      <table>
-        <tr><th>ID</th><th>姓名</th><th>卡號</th><th>刷碼時間</th><th>IP 位址</th></tr>
-        ${rows || "<tr><td colspan='5'>尚無紀錄</td></tr>"}
-      </table>
-    </body></html>
-  `);
-});
-
-// === 掃碼器頁面（顯示會員照片） ===
+// === 掃碼器頁面（含語音播報 + 照片） ===
 app.get("/scanner", (req, res) => {
   res.send(`
-    <html>
-      <head>
-        <meta charset="utf-8"><title>會員掃碼驗證</title>
-        <style>
-          body{font-family:'Noto Sans TC';text-align:center;background:#f9f9f9;padding-top:80px;}
-          input{width:80%;font-size:20px;padding:10px;}
-          .result{margin-top:30px;font-size:24px;}
-          .success{color:#2e7d32;}
-          .error{color:#c62828;}
-          img{margin-top:15px;border-radius:10px;max-width:180px;}
-        </style>
-      </head>
-      <body>
-        <h1>📷 會員掃碼驗證</h1>
-        <p>請將游標放在輸入框內，使用掃碼槍掃描 QR Code</p>
-        <input id="scannerInput" placeholder="請掃描 QR Code..." autofocus />
-        <div id="result" class="result"></div>
-        <script>
-          const input=document.getElementById("scannerInput");
-          const resultDiv=document.getElementById("result");
-          input.addEventListener("keypress",async(e)=>{
-            if(e.key==="Enter"){
-              const url=input.value.trim();
-              if(!url)return;
-              resultDiv.innerHTML="⏳ 驗證中...";
-              const res=await fetch("/api/check-member?url="+encodeURIComponent(url));
-              const data=await res.json();
-              if(data.success){
-                resultDiv.innerHTML=\`✅ <div class='success'>會員：\${data.name} (\${data.card_number})</div>
-                  <img src="\${data.photo_url}" alt="photo">\`;
-              }else{
-                resultDiv.innerHTML="❌ <span class='error'>"+data.message+"</span>";
-              }
-              input.value="";
+    <html><head>
+      <meta charset="utf-8"><title>會員掃碼驗證</title>
+      <style>
+        body{font-family:'Noto Sans TC';text-align:center;background:#f9f9f9;padding-top:80px;}
+        input{width:80%;font-size:20px;padding:10px;}
+        .result{margin-top:30px;font-size:24px;}
+        .success{color:#2e7d32;}
+        .error{color:#c62828;}
+        img{margin-top:15px;border-radius:10px;max-width:180px;}
+      </style>
+    </head>
+    <body>
+      <h1>📷 會員掃碼驗證</h1>
+      <p>請將游標放在輸入框內，使用掃碼槍掃描 QR Code</p>
+      <input id="scannerInput" placeholder="請掃描 QR Code..." autofocus />
+      <div id="result" class="result"></div>
+      <script>
+        const input=document.getElementById("scannerInput");
+        const resultDiv=document.getElementById("result");
+        const speak=(text)=>{
+          const msg=new SpeechSynthesisUtterance(text);
+          msg.lang='zh-TW';
+          msg.rate=1.0;
+          speechSynthesis.speak(msg);
+        };
+        input.addEventListener("keypress",async(e)=>{
+          if(e.key==="Enter"){
+            const url=input.value.trim();
+            if(!url)return;
+            resultDiv.innerHTML="⏳ 驗證中...";
+            const res=await fetch("/api/check-member?url="+encodeURIComponent(url));
+            const data=await res.json();
+            if(data.success){
+              resultDiv.innerHTML=\`✅ <div class='success'>會員：\${data.name} (\${data.card_number})</div><img src="\${data.photo_url}" alt="photo">\`;
+              speak("會員通過");
+            }else{
+              resultDiv.innerHTML="❌ <span class='error'>"+data.message+"</span>";
+              speak("非會員，拒絕通過");
             }
-          });
-        </script>
-      </body>
-    </html>
+            input.value="";
+          }
+        });
+      </script>
+    </body></html>
   `);
 });
 
-// === API：檢查會員並回傳照片 ===
+// === API：檢查會員 ===
 app.get("/api/check-member", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.json({ success: false, message: "未提供 URL" });
-  const match = url.match(/\/member\/(\d+)/);
+  const match = url.match(/\\/member\\/(\\d+)/);
   if (!match) return res.json({ success: false, message: "無效 QR Code" });
   const id = match[1];
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
