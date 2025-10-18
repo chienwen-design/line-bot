@@ -202,20 +202,36 @@ async function handleMessage(event) {
   const userId = event.source.userId;
   const msgType = event.message.type;
   const msgText = event.message.text?.trim();
+  if (msgType !== "text") return; // 僅處理文字訊息
+
+  // === 手動指令：重新註冊 ===
+  if (msgText === "重新註冊") {
+    const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
+    if (result.rows.length === 0) {
+      // 尚未加入會員
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "您尚未成為會員，請先加入好友再重新註冊喔！",
+      });
+      return;
+    }
+
+    await pool.query(
+      "UPDATE members SET registration_step=1, phone=NULL, card_number=NULL, photo_url=NULL, qrcode=NULL WHERE line_user_id=$1",
+      [userId]
+    );
+
+    await client.replyMessage(event.replyToken, [
+      { type: "text", text: "🔄 已重新開始註冊流程！" },
+      { type: "text", text: "請輸入您的手機號碼（例如：0912345678）" },
+    ]);
+    return; // ⬅️ 很重要，避免下面流程繼續執行
+  }
+
+  // === 註冊與修改流程 ===
   const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
   const member = result.rows[0];
-  // 手動指令: 若使用者輸入「重新註冊」
-  if (msgText === "重新註冊") {
-    await pool.query("UPDATE members SET registration_step=1 WHERE line_user_id=$1", [userId]);
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: "🔄 已重新開始註冊，請輸入您的手機號碼：",
-    });
-    return;
-  }
   if (!member) return;
-
-
 
   // 查詢「我的資訊」
   if (msgType === "text" && msgText === "我的資訊") {
