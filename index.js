@@ -273,8 +273,8 @@ async function handleMessage(event) {
     return;
   }
 
-// === 註冊階段控制 ===
-if (member.registration_step === 1) {
+  // === 註冊階段控制 ===
+  if (member.registration_step === 1) {
   if (/^09\d{8}$/.test(msgText)) {
     // ✅ 正確手機格式
     await pool.query("UPDATE members SET phone=$1, registration_step=2 WHERE line_user_id=$2", [msgText, userId]);
@@ -285,7 +285,7 @@ if (member.registration_step === 1) {
   return;
 }
 
-if (member.registration_step === 2) {
+  if (member.registration_step === 2) {
   // 卡號可用英數混合
   if (/^[A-Za-z0-9]{5,}$/.test(msgText)) {
     await pool.query("UPDATE members SET card_number=$1, registration_step=3 WHERE line_user_id=$2", [msgText, userId]);
@@ -296,7 +296,7 @@ if (member.registration_step === 2) {
   return;
 }
 
-if (member.registration_step === 3) {
+  if (member.registration_step === 3) {
   if (msgType === "image") {
     // ✅ 照片上傳流程（同你目前程式）
     const messageId = event.message.id;
@@ -339,7 +339,6 @@ if (member.registration_step === 3) {
   }
   return;
 }
-
 
   // === 修改資料流程 ===
   if (member.registration_step === 10) {
@@ -512,9 +511,6 @@ app.get("/logs", async (req, res) => {
 });
 
 // === 啟動伺服器 ===
-initializeDatabase().then(async () => {
-  await setupRichMenu();
-  // === 啟動伺服器 ===
 initializeDatabase().then(async () => {
   await setupRichMenu();
 
