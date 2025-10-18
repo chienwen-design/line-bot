@@ -132,7 +132,7 @@ async function handleFollow(event) {
     );
   }
   await client.replyMessage(event.replyToken, [
-    { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
+   // { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
     { type: "text", text: "請輸入您的手機號碼（例如：0912345678）開始註冊。" },
   ]);
 }
@@ -204,7 +204,18 @@ async function handleMessage(event) {
   const msgText = event.message.text?.trim();
   const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
   const member = result.rows[0];
+  // 手動指令: 若使用者輸入「重新註冊」
+  if (msgText === "重新註冊") {
+    await pool.query("UPDATE members SET registration_step=1 WHERE line_user_id=$1", [userId]);
+    await client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "🔄 已重新開始註冊，請輸入您的手機號碼：",
+    });
+    return;
+  }
   if (!member) return;
+
+
 
   // 查詢「我的資訊」
   if (msgType === "text" && msgText === "我的資訊") {
@@ -487,5 +498,25 @@ app.get("/logs", async (req, res) => {
 // === 啟動伺服器 ===
 initializeDatabase().then(async () => {
   await setupRichMenu();
+  // === 啟動伺服器 ===
+initializeDatabase().then(async () => {
+  await setupRichMenu();
+
+  // 🔹 定期檢查未完成註冊的會員，超過24小時則重設
+  setInterval(async () => {
+    try {
+      await pool.query(`
+        UPDATE members
+        SET registration_step = 1
+        WHERE registration_step BETWEEN 1 AND 3
+          AND created_at < NOW() - INTERVAL '24 HOURS'
+      `);
+      console.log("🕒 已自動重設超時未完成註冊的會員資料。");
+    } catch (err) {
+      console.error("❌ 自動重設註冊狀態失敗：", err);
+    }
+  }, 1000 * 60 * 60); // 每小時執行一次
+
   app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 });
+

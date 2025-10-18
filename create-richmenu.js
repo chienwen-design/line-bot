@@ -14,7 +14,7 @@ async function createRichMenu() {
   // 1️⃣ 定義 Rich Menu 結構
   const richMenu = {
     size: { width: 2500, height: 843 },
-    selected: true,
+    selected: false,
     name: "會員主選單",
     chatBarText: "會員功能",
     areas: [
