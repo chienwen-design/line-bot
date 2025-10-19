@@ -24,7 +24,7 @@ cloudinary.config({
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
-
+console.log("☁️ Cloudinary 設定載入：", cloudinary.config());
 // === PostgreSQL 設定 ===
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -243,10 +243,10 @@ async function handleMessage(event) {
 
 // === 上傳照片階段（初次或重新註冊）===
 if (msgType === "image") {
-  // 查詢會員資料與當前狀態
   const currentMember = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
   const m = currentMember.rows[0];
   if (!m) return;
+
   if (m.registration_step !== 3) {
     await client.replyMessage(event.replyToken, {
       type: "text",
@@ -258,17 +258,21 @@ if (msgType === "image") {
   try {
     const messageId = event.message.id;
     const stream = await client.getMessageContent(messageId);
+    console.log("📤 取得 LINE 照片串流中...");
 
-    console.log("📤 開始上傳照片到 Cloudinary...");
-
-    // 將 LINE 的 stream 明確轉為 Cloudinary 可用 Buffer
+    // 將 LINE stream 收成 Buffer
     const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-    }
+    for await (const chunk of stream) chunks.push(chunk);
     const buffer = Buffer.concat(chunks);
+    console.log("📦 收到照片大小：", buffer.length, "bytes");
 
-    const uploadResult = await cloudinary.uploader.upload_stream;
+    // 試上傳前先 ping 一下 Cloudinary
+    const cloudCheck = cloudinary.config();
+    if (!cloudCheck.cloud_name) {
+      throw new Error("❌ Cloudinary 未設定正確！");
+    }
+
+    // 上傳到 Cloudinary
     const photoUpload = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
@@ -281,7 +285,7 @@ if (msgType === "image") {
             console.error("❌ Cloudinary 上傳錯誤：", err);
             reject(err);
           } else {
-            console.log("✅ Cloudinary 上傳成功:", result.secure_url);
+            console.log("✅ Cloudinary 上傳成功：", result.secure_url);
             resolve(result);
           }
         }
@@ -292,17 +296,12 @@ if (msgType === "image") {
     const photoUrl = photoUpload.secure_url;
     await pool.query("UPDATE members SET photo_url=$1 WHERE id=$2", [photoUrl, m.id]);
 
-    // === 產生 QR Code ===
+    // 產生 QR Code 並上傳
     const memberUrl = `${BASE_URL}/member/${m.id}`;
     const qrBuffer = await QRCode.toBuffer(memberUrl, { width: 300, margin: 2 });
-
     const qrUpload = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
-        {
-          folder: "line_qrcodes",
-          public_id: `member_${m.id}`,
-          overwrite: true,
-        },
+        { folder: "line_qrcodes", public_id: `member_${m.id}`, overwrite: true },
         (err, result) => (err ? reject(err) : resolve(result))
       );
       uploadStream.end(qrBuffer);
@@ -323,13 +322,12 @@ if (msgType === "image") {
         originalContentUrl: qrUpload.secure_url,
         previewImageUrl: qrUpload.secure_url,
       },
-      { type: "text", text: "您可隨時點選主選單的「我的資訊」查看資料 🙌" },
     ]);
   } catch (err) {
     console.error("❌ 上傳流程失敗：", err);
     await client.replyMessage(event.replyToken, {
       type: "text",
-      text: "❌ 上傳照片時發生錯誤，請稍後再試。",
+      text: "❌ 上傳失敗：" + err.message,
     });
   }
   return;
