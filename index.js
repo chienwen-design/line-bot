@@ -7,7 +7,6 @@ import { v2 as cloudinary } from "cloudinary";
 import fs from "fs";
 
 dotenv.config();
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -24,7 +23,7 @@ cloudinary.config({
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
-console.log("☁️ Cloudinary 設定載入：", cloudinary.config());
+
 // === PostgreSQL 設定 ===
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -46,6 +45,7 @@ async function initializeDatabase() {
       qrcode TEXT,
       photo_url TEXT,
       registration_step INTEGER DEFAULT 1,
+      last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
@@ -71,40 +71,25 @@ async function setupRichMenu() {
       console.log("🟢 已存在 Rich Menu，略過建立");
       return;
     }
-
     const richMenu = {
       size: { width: 2500, height: 843 },
-      selected: false,
+      selected: false, // 預設縮起來
       name: "會員主選單",
       chatBarText: "會員功能",
       areas: [
-        {
-          bounds: { x: 0, y: 0, width: 833, height: 843 },
-          action: { type: "postback", data: "my_qr" },
-        },
-        {
-          bounds: { x: 834, y: 0, width: 833, height: 843 },
-          action: { type: "postback", data: "my_info" },
-        },
-        {
-          bounds: { x: 1667, y: 0, width: 833, height: 843 },
-          action: {  type: "postback", data: "edit_info" },
-        },
+        { bounds: { x: 0, y: 0, width: 833, height: 843 }, action: { type: "postback", data: "my_qr" } },
+        { bounds: { x: 834, y: 0, width: 833, height: 843 }, action: { type: "postback", data: "my_info" } },
+        { bounds: { x: 1667, y: 0, width: 833, height: 843 }, action: { type: "postback", data: "edit_info" } },
       ],
     };
 
     const richMenuId = await client.createRichMenu(richMenu);
-    console.log("✅ 已建立 Rich Menu:", richMenuId);
-
     if (fs.existsSync("./richmenu.png")) {
       await client.setRichMenuImage(richMenuId, fs.createReadStream("./richmenu.png"));
       console.log("🖼️ Rich Menu 圖像上傳成功");
-    } else {
-      console.warn("⚠️ 找不到 richmenu.png，請確認檔案存在根目錄");
     }
-
     await client.setDefaultRichMenu(richMenuId);
-    console.log("🚀 已設定為預設 Rich Menu");
+    console.log("✅ 已設定預設 Rich Menu");
   } catch (err) {
     console.error("❌ Rich Menu 建立失敗:", err);
   }
@@ -120,30 +105,26 @@ app.post("/webhook", middleware(config), async (req, res) => {
   }
 });
 
-// === Follow 事件：自動建立會員 ===
+// === Follow 事件 ===
 async function handleFollow(event) {
   const userId = event.source.userId;
   const profile = await client.getProfile(userId);
   const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
   if (result.rows.length === 0) {
-    await pool.query(
-      "INSERT INTO members (line_user_id, name, registration_step) VALUES ($1,$2,1)",
-      [userId, profile.displayName]
-    );
+    await pool.query("INSERT INTO members (line_user_id, name) VALUES ($1,$2)", [userId, profile.displayName]);
   }
   await client.replyMessage(event.replyToken, [
-   // { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
+    { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
     { type: "text", text: "請輸入您的手機號碼（例如：0912345678）開始註冊。" },
   ]);
 }
 
-// === Postback 處理（Rich Menu） ===
+// === Postback 事件 ===
 async function handlePostback(event) {
   const userId = event.source.userId;
   const data = event.postback.data;
   const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
   const member = result.rows[0];
-
   if (!member) return;
 
   if (data === "my_qr") {
@@ -165,13 +146,7 @@ async function handlePostback(event) {
         altText: "我的會員資料",
         contents: {
           type: "bubble",
-          hero: {
-            type: "image",
-            url: member.photo_url || "https://cdn-icons-png.flaticon.com/512/149/149071.png",
-            size: "full",
-            aspectRatio: "1:1",
-            aspectMode: "cover",
-          },
+          hero: { type: "image", url: member.photo_url || "https://cdn-icons-png.flaticon.com/512/149/149071.png", size: "full" },
           body: {
             type: "box",
             layout: "vertical",
@@ -190,179 +165,53 @@ async function handlePostback(event) {
 
   if (data === "edit_info") {
     await pool.query("UPDATE members SET registration_step=10 WHERE line_user_id=$1", [userId]);
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: "請輸入要修改的項目：手機 / 卡號 / 照片",
-    });
+    await client.replyMessage(event.replyToken, { type: "text", text: "請輸入要修改的項目：手機 / 卡號 / 照片" });
   }
 }
 
-// === Message 處理 ===
+// === Message 事件 ===
 async function handleMessage(event) {
   const userId = event.source.userId;
   const msgType = event.message.type;
   const msgText = event.message.text?.trim();
-  
-  if (msgType !== "text") return; // 僅處理文字訊息
+  if (msgType !== "text" && msgType !== "image") return;
 
-  // === 手動指令：重新註冊 ===
-  if (msgText === "重新註冊") {
+  // 手動重新註冊
+  if (msgType === "text" && msgText === "重新註冊") {
     const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
-    if (result.rows.length === 0) {
-      // 尚未加入會員
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: "您尚未成為會員，請先加入好友再重新註冊喔！",
-      });
-      return;
-    }
-
-    await pool.query(
-      "UPDATE members SET registration_step=1, phone=NULL, card_number=NULL, photo_url=NULL, qrcode=NULL WHERE line_user_id=$1",
-      [userId]
-    );
-
+    if (result.rows.length === 0) return;
+    await pool.query("UPDATE members SET phone=NULL, card_number=NULL, photo_url=NULL, qrcode=NULL, registration_step=1 WHERE line_user_id=$1", [userId]);
     await client.replyMessage(event.replyToken, [
       { type: "text", text: "🔄 已重新開始註冊流程！" },
 	  { type: "text", text: "請依照順序輸入資料（手機 → 卡號 → 照片）" },
       { type: "text", text: "請輸入您的手機號碼（例如：0912345678）" },
     ]);
-    return; // ⬅️ 很重要，避免下面流程繼續執行	
+    return;
   }
 
-  // === 註冊與修改流程 ===
   const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
   const member = result.rows[0];
   if (!member) return;
+  await pool.query("UPDATE members SET last_active=NOW() WHERE line_user_id=$1", [userId]);
 
-  // 查詢「我的資訊」
-  if (msgType === "text" && msgText === "我的資訊") {
-    await handlePostback({ source: { userId }, postback: { data: "my_info" }, replyToken: event.replyToken });
-    return;
-  }
-
-// === 上傳照片階段（初次或重新註冊）===
-if (msgType === "image") {
-  const currentMember = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
-  const m = currentMember.rows[0];
-  if (!m) return;
-
-  if (m.registration_step !== 3) {
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: "⚠️ 請依照順序操作（先輸入手機與卡號後再上傳照片）。",
-    });
-    return;
-  }
-
-  try {
-    const messageId = event.message.id;
-    const stream = await client.getMessageContent(messageId);
-    console.log("📤 取得 LINE 照片串流中...");
-
-    // 將 LINE stream 收成 Buffer
-    const chunks = [];
-    for await (const chunk of stream) chunks.push(chunk);
-    const buffer = Buffer.concat(chunks);
-    console.log("📦 收到照片大小：", buffer.length, "bytes");
-
-    // 試上傳前先 ping 一下 Cloudinary
-    const cloudCheck = cloudinary.config();
-    if (!cloudCheck.cloud_name) {
-      throw new Error("❌ Cloudinary 未設定正確！");
-    }
-
-    // 上傳到 Cloudinary
-    const photoUpload = await new Promise((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(
-        {
-          folder: "member_photos",
-          public_id: `member_${m.id}_${Date.now()}`,
-          overwrite: true,
-        },
-        (err, result) => {
-          if (err) {
-            console.error("❌ Cloudinary 上傳錯誤：", err);
-            reject(err);
-          } else {
-            console.log("✅ Cloudinary 上傳成功：", result.secure_url);
-            resolve(result);
-          }
-        }
-      );
-      uploadStream.end(buffer);
-    });
-
-    const photoUrl = photoUpload.secure_url;
-    await pool.query("UPDATE members SET photo_url=$1 WHERE id=$2", [photoUrl, m.id]);
-
-    // 產生 QR Code 並上傳
-    const memberUrl = `${BASE_URL}/member/${m.id}`;
-    const qrBuffer = await QRCode.toBuffer(memberUrl, { width: 300, margin: 2 });
-    const qrUpload = await new Promise((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(
-        { folder: "line_qrcodes", public_id: `member_${m.id}`, overwrite: true },
-        (err, result) => (err ? reject(err) : resolve(result))
-      );
-      uploadStream.end(qrBuffer);
-    });
-
-    await pool.query(
-      "UPDATE members SET qrcode=$1, registration_step=0 WHERE id=$2",
-      [qrUpload.secure_url, m.id]
-    );
-
-    console.log("✅ 已為會員", m.id, "產生 QR：", qrUpload.secure_url);
-
-    await client.replyMessage(event.replyToken, [
-      { type: "text", text: "📸 照片上傳成功！" },
-      { type: "text", text: "✅ 註冊完成，以下是您的會員 QR Code 👇" },
-      {
-        type: "image",
-        originalContentUrl: qrUpload.secure_url,
-        previewImageUrl: qrUpload.secure_url,
-      },
-    ]);
-  } catch (err) {
-    console.error("❌ 上傳流程失敗：", err);
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: "❌ 上傳失敗：" + err.message,
-    });
-  }
-  return;
-}
-
-
-  // === 註冊階段控制 ===
-  if (member.registration_step === 1) {
-  if (/^09\d{8}$/.test(msgText)) {
-    // ✅ 正確手機格式
+  // === 註冊流程 ===
+  if (member.registration_step === 1 && /^09\d{8}$/.test(msgText)) {
     await pool.query("UPDATE members SET phone=$1, registration_step=2 WHERE line_user_id=$2", [msgText, userId]);
     await client.replyMessage(event.replyToken, { type: "text", text: "📱 手機號碼已登錄成功，請輸入您的會員卡號（例如：A123456）" });
-  } else {
-    await client.replyMessage(event.replyToken, { type: "text", text: "❌ 手機號格式不正確，請重新輸入（例如：0912345678）" });
+    return;
   }
-  return;
-}
-
   if (member.registration_step === 2) {
-  // 卡號可用英數混合
-  if (/^[A-Za-z0-9]{5,}$/.test(msgText)) {
-    await pool.query("UPDATE members SET card_number=$1, registration_step=3 WHERE line_user_id=$2", [msgText, userId]);
-    await client.replyMessage(event.replyToken, { type: "text", text: "💳 會員卡號已登錄成功，請上傳您的照片以完成註冊。" });
-  } else {
-    await client.replyMessage(event.replyToken, { type: "text", text: "❌ 卡號格式不正確，請重新輸入（例如：A123456）" });
+    if (/^[A-Za-z0-9]{5,}$/.test(msgText)) {
+      await pool.query("UPDATE members SET card_number=$1, registration_step=3 WHERE line_user_id=$2", [msgText, userId]);
+      await client.replyMessage(event.replyToken, { type: "text", text: "💳 會員卡號已登錄成功，請上傳您的照片以完成註冊。" });
+    } else {
+      await client.replyMessage(event.replyToken, { type: "text", text: "❌ 卡號格式不正確，請重新輸入（例如：A123456）" });
+    }
+    return;
   }
-  return;
-}
-
-  if (member.registration_step === 3) {
-  if (msgType === "image") {
+  if (member.registration_step === 3 && msgType === "image") {
     const messageId = event.message.id;
     const stream = await client.getMessageContent(messageId);
-
-    // 上傳照片到 Cloudinary
     const upload = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         { folder: "member_photos", public_id: `member_${member.id}_${Date.now()}` },
@@ -370,13 +219,8 @@ if (msgType === "image") {
       );
       stream.pipe(uploadStream);
     });
-
     const photoUrl = upload.secure_url;
-
-    // 儲存照片
     await pool.query("UPDATE members SET photo_url=$1 WHERE line_user_id=$2", [photoUrl, userId]);
-
-    // 產生新的 QR Code（不論初次或重新註冊都重新產生）
     const memberUrl = `${BASE_URL}/member/${member.id}`;
     const qrBuffer = await QRCode.toBuffer(memberUrl, { width: 300, margin: 2 });
     const qrUpload = await new Promise((resolve, reject) => {
@@ -385,35 +229,14 @@ if (msgType === "image") {
         (err, result) => (err ? reject(err) : resolve(result))
       ).end(qrBuffer);
     });
-
-    // 更新 QR Code 並將 step 改為 0（完成）
-    await pool.query(
-      "UPDATE members SET qrcode=$1, registration_step=0 WHERE id=$2",
-      [qrUpload.secure_url, member.id]
-    );
-
-    // 回覆完成訊息
+    await pool.query("UPDATE members SET qrcode=$1, registration_step=0 WHERE id=$2", [qrUpload.secure_url, member.id]);
     await client.replyMessage(event.replyToken, [
       { type: "text", text: "📸 照片上傳成功！" },
       { type: "text", text: "✅ 註冊完成，以下是您的會員 QR Code 👇" },
-      {
-        type: "image",
-        originalContentUrl: qrUpload.secure_url,
-        previewImageUrl: qrUpload.secure_url,
-      },
-      {
-        type: "text",
-        text: "可使用主選單查看更多會員資訊喔 🙌",
-      },
+      { type: "image", originalContentUrl: qrUpload.secure_url, previewImageUrl: qrUpload.secure_url },
     ]);
-  } else {
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: "請上傳您的照片以完成註冊。",
-    });
+    return;
   }
-  return;
-}
 
   // === 修改資料流程 ===
   if (member.registration_step === 10) {
@@ -432,29 +255,20 @@ if (msgType === "image") {
       await client.replyMessage(event.replyToken, { type: "text", text: "請上傳新的會員照片。" });
       return;
     }
-    await client.replyMessage(event.replyToken, { type: "text", text: "請輸入：手機 / 卡號 / 照片" });
-    return;
   }
-
-  // === 修改手機 ===
   if (member.registration_step === 11 && /^09\d{8}$/.test(msgText)) {
     await pool.query("UPDATE members SET phone=$1, registration_step=0 WHERE line_user_id=$2", [msgText, userId]);
     await client.replyMessage(event.replyToken, { type: "text", text: "✅ 手機號碼已更新！" });
     return;
   }
-
-  // === 修改卡號 ===
   if (member.registration_step === 12) {
     await pool.query("UPDATE members SET card_number=$1, registration_step=0 WHERE line_user_id=$2", [msgText, userId]);
     await client.replyMessage(event.replyToken, { type: "text", text: "✅ 會員卡號已更新！" });
     return;
   }
-
-  // === 修改照片 ===
   if (member.registration_step === 13 && msgType === "image") {
     const messageId = event.message.id;
     const stream = await client.getMessageContent(messageId);
-
     const upload = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         { folder: "member_photos", public_id: `member_${member.id}_${Date.now()}` },
@@ -462,84 +276,27 @@ if (msgType === "image") {
       );
       stream.pipe(uploadStream);
     });
-
     const photoUrl = upload.secure_url;
     await pool.query("UPDATE members SET photo_url=$1, registration_step=0 WHERE line_user_id=$2", [photoUrl, userId]);
-    await client.replyMessage(event.replyToken, { type: "text", text: "📸 新照片已更新完成！" });
+    await client.replyMessage(event.replyToken, { type: "text", text: "📸 照片已更新完成！" });
     return;
   }
-
 }
 
-// === 主選單 Flex ===
-function createFlexMenu(qrUrl) {
-  return {
-    type: "flex",
-    altText: "會員功能選單",
-    contents: {
-      type: "bubble",
-      body: {
-        type: "box",
-        layout: "vertical",
-        spacing: "md",
-        contents: [
-          { type: "text", text: "🎯 會員功能選單", weight: "bold", align: "center" },
-          { type: "button", style: "primary", color: "#2E86DE", action: { type: "uri", label: "我的 QR Code", uri: qrUrl } },
-          { type: "button", style: "primary", color: "#00B894", action: { type: "message", label: "查詢我的資訊", text: "我的資訊" } },
-        ],
-      },
-    },
-  };
-}
-
-// === 掃碼頁面（含語音播報 + 照片） ===
+// === 掃碼頁面 ===
 app.get("/scanner", (req, res) => {
   res.send(`
-    <html><head>
-      <meta charset="utf-8"><title>會員掃碼驗證</title>
-      <style>
-        body{font-family:'Noto Sans TC';text-align:center;background:#f9f9f9;padding-top:80px;}
-        input{width:80%;font-size:20px;padding:10px;}
-        .result{margin-top:30px;font-size:24px;}
-        .success{color:#2e7d32;}
-        .error{color:#c62828;}
-        img{margin-top:15px;border-radius:10px;max-width:180px;}
-      </style>
-    </head>
-    <body>
-      <h1>📷 會員掃碼驗證</h1>
-      <p>請將游標放在輸入框內，使用掃碼槍掃描 QR Code</p>
-      <input id="scannerInput" placeholder="請掃描 QR Code..." autofocus />
-      <div id="result" class="result"></div>
-      <script>
-        const input=document.getElementById("scannerInput");
-        const resultDiv=document.getElementById("result");
-        const speak=(text)=>{
-          const msg=new SpeechSynthesisUtterance(text);
-          msg.lang='zh-TW';
-          msg.rate=1.0;
-          speechSynthesis.speak(msg);
-        };
-        input.addEventListener("keypress",async(e)=>{
-          if(e.key==="Enter"){
-            const url=input.value.trim();
-            if(!url)return;
-            resultDiv.innerHTML="⏳ 驗證中...";
-            const res=await fetch("/api/check-member?url="+encodeURIComponent(url));
-            const data=await res.json();
-            if(data.success){
-              resultDiv.innerHTML=\`✅ <div class='success'>會員：\${data.name} (\${data.card_number})</div><img src="\${data.photo_url}" alt="photo">\`;
-              speak("會員通過");
-            }else{
-              resultDiv.innerHTML="❌ <span class='error'>"+data.message+"</span>";
-              speak("非會員，拒絕通過");
-            }
-            input.value="";
-          }
-        });
-      </script>
-    </body></html>
-  `);
+<html><head><meta charset="utf-8"><title>會員掃碼驗證</title>
+<style>body{text-align:center;font-family:'Noto Sans TC';padding-top:80px;}input{font-size:20px;width:80%;}</style>
+</head><body><h1>📷 會員掃碼驗證</h1>
+<p>請掃描 QR Code</p><input id="scannerInput" autofocus />
+<div id="result"></div>
+<script>
+const input=document.getElementById("scannerInput");const result=document.getElementById("result");
+const speak=(t)=>{const m=new SpeechSynthesisUtterance(t);m.lang='zh-TW';speechSynthesis.speak(m)};
+input.addEventListener("keypress",async(e)=>{if(e.key==="Enter"){const url=input.value.trim();input.value="";result.innerHTML="⏳ 驗證中...";const res=await fetch("/api/check-member?url="+encodeURIComponent(url));const d=await res.json();if(d.success){result.innerHTML="✅ "+d.name+" ("+d.card_number+")<br><img src='"+d.photo_url+"' width=150>";speak("會員通過");}else{result.innerHTML="❌ "+d.message;speak("非會員，拒絕通過");}}});
+</script></body></html>
+`);
 });
 
 // === API: 掃碼驗證 ===
@@ -552,58 +309,25 @@ app.get("/api/check-member", async (req, res) => {
   const result = await pool.query("SELECT * FROM members WHERE id=$1", [id]);
   const member = result.rows[0];
   if (!member) return res.json({ success: false, message: "查無會員" });
-  await pool.query(
-    "INSERT INTO scan_logs (member_id, member_name, card_number, ip_address) VALUES ($1,$2,$3,$4)",
-    [member.id, member.name, member.card_number, ip]
-  );
+  await pool.query("INSERT INTO scan_logs (member_id, member_name, card_number, ip_address) VALUES ($1,$2,$3,$4)", [member.id, member.name, member.card_number, ip]);
   res.json({ success: true, name: member.name, card_number: member.card_number, photo_url: member.photo_url });
 });
 
 // === /logs 頁面 ===
 app.get("/logs", async (req, res) => {
   const result = await pool.query("SELECT * FROM scan_logs ORDER BY scanned_at DESC LIMIT 50");
-  const rows = result.rows.map(
-    (r) => `<tr><td>${r.id}</td><td>${r.member_name}</td><td>${r.card_number}</td><td>${new Date(r.scanned_at).toLocaleString()}</td><td>${r.ip_address}</td></tr>`
-  ).join("");
-  res.send(`
-    <html><head><meta charset="utf-8"><title>刷碼紀錄</title>
-    <style>
-      body{font-family:'Noto Sans TC';background:#f4f6f8;padding:40px;}
-      h1{text-align:center;color:#2e7d32;}
-      table{width:100%;border-collapse:collapse;background:white;}
-      th,td{padding:10px;border-bottom:1px solid #ddd;text-align:center;}
-      th{background:#81c784;color:white;}
-      tr:hover{background:#f1f8e9;}
-    </style></head>
-    <body>
-      <h1>📋 最近 50 筆刷碼紀錄</h1>
-      <table>
-        <tr><th>ID</th><th>姓名</th><th>卡號</th><th>刷碼時間</th><th>IP 位址</th></tr>
-        ${rows || "<tr><td colspan='5'>尚無紀錄</td></tr>"}
-      </table>
-    </body></html>
-  `);
+  const rows = result.rows.map(r => `<tr><td>${r.id}</td><td>${r.member_name}</td><td>${r.card_number}</td><td>${new Date(r.scanned_at).toLocaleString()}</td><td>${r.ip_address}</td></tr>`).join("");
+  res.send(`<html><head><meta charset="utf-8"><style>table{border-collapse:collapse;width:100%;}th,td{padding:10px;border:1px solid #ddd;}</style></head><body><h2>📋 最近50筆刷碼紀錄</h2><table><tr><th>ID</th><th>姓名</th><th>卡號</th><th>時間</th><th>IP</th></tr>${rows}</table></body></html>`);
 });
 
-// === 啟動伺服器 ===
+// === 定期重設未完成註冊 ===
+setInterval(async () => {
+  await pool.query("UPDATE members SET registration_step=1 WHERE registration_step BETWEEN 1 AND 3 AND last_active < NOW() - INTERVAL '24 HOURS'");
+  console.log("🕒 自動重設超時未完成註冊的會員");
+}, 1000 * 60 * 60);
+
+// === 啟動 ===
 initializeDatabase().then(async () => {
   await setupRichMenu();
-
-  // 🔹 定期檢查未完成註冊的會員，超過24小時則重設
-  setInterval(async () => {
-    try {
-      await pool.query(`
-        UPDATE members
-        SET registration_step = 1
-        WHERE registration_step BETWEEN 1 AND 3
-          AND created_at < NOW() - INTERVAL '24 HOURS'
-      `);
-      console.log("🕒 已自動重設超時未完成註冊的會員資料。");
-    } catch (err) {
-      console.error("❌ 自動重設註冊狀態失敗：", err);
-    }
-  }, 1000 * 60 * 60); // 每小時執行一次
-
   app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 });
-
