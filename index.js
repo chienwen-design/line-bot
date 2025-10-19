@@ -223,9 +223,10 @@ async function handleMessage(event) {
 
     await client.replyMessage(event.replyToken, [
       { type: "text", text: "🔄 已重新開始註冊流程！" },
+	  { type: "text", text: "請依照順序輸入資料（手機 → 卡號 → 照片）" }
       { type: "text", text: "請輸入您的手機號碼（例如：0912345678）" },
     ]);
-    return; // ⬅️ 很重要，避免下面流程繼續執行
+    return; // ⬅️ 很重要，避免下面流程繼續執行	
   }
 
   // === 註冊與修改流程 ===
@@ -298,10 +299,10 @@ async function handleMessage(event) {
 
   if (member.registration_step === 3) {
   if (msgType === "image") {
-    // ✅ 照片上傳流程（同你目前程式）
     const messageId = event.message.id;
     const stream = await client.getMessageContent(messageId);
 
+    // 上傳照片到 Cloudinary
     const upload = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         { folder: "member_photos", public_id: `member_${member.id}_${Date.now()}` },
@@ -311,31 +312,45 @@ async function handleMessage(event) {
     });
 
     const photoUrl = upload.secure_url;
+
+    // 儲存照片
     await pool.query("UPDATE members SET photo_url=$1 WHERE line_user_id=$2", [photoUrl, userId]);
 
-    // 產生 QR Code
+    // 產生新的 QR Code（不論初次或重新註冊都重新產生）
     const memberUrl = `${BASE_URL}/member/${member.id}`;
     const qrBuffer = await QRCode.toBuffer(memberUrl, { width: 300, margin: 2 });
     const qrUpload = await new Promise((resolve, reject) => {
       cloudinary.uploader.upload_stream(
-        { folder: "line_qrcodes", public_id: `member_${member.id}` },
+        { folder: "line_qrcodes", public_id: `member_${member.id}`, overwrite: true },
         (err, result) => (err ? reject(err) : resolve(result))
       ).end(qrBuffer);
     });
 
-    await pool.query("UPDATE members SET qrcode=$1, registration_step=0 WHERE id=$2", [qrUpload.secure_url, member.id]);
+    // 更新 QR Code 並將 step 改為 0（完成）
+    await pool.query(
+      "UPDATE members SET qrcode=$1, registration_step=0 WHERE id=$2",
+      [qrUpload.secure_url, member.id]
+    );
+
+    // 回覆完成訊息
     await client.replyMessage(event.replyToken, [
       { type: "text", text: "📸 照片上傳成功！" },
-      { type: "text", text: "✅ 註冊完成！以下是您的 QR Code 👇" },
+      { type: "text", text: "✅ 註冊完成，以下是您的會員 QR Code 👇" },
       {
         type: "image",
         originalContentUrl: qrUpload.secure_url,
         previewImageUrl: qrUpload.secure_url,
       },
+      {
+        type: "text",
+        text: "可使用主選單查看更多會員資訊喔 🙌",
+      },
     ]);
   } else {
-    // 🚫 若還沒上傳照片就亂輸入文字
-    await client.replyMessage(event.replyToken, { type: "text", text: "請上傳您的照片以完成註冊。" });
+    await client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "請上傳您的照片以完成註冊。",
+    });
   }
   return;
 }
