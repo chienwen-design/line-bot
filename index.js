@@ -243,65 +243,78 @@ async function handleMessage(event) {
 
 // === 上傳照片階段（初次或重新註冊）===
 if (msgType === "image") {
-  // 先查資料庫確認當前步驟
+  // 查詢會員資料與當前狀態
   const currentMember = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
   const m = currentMember.rows[0];
-  const currentStep = m?.registration_step || 0;
-
-  // 只允許 step=3 的使用者進入
-  if (currentStep !== 3) {
+  if (!m) return;
+  if (m.registration_step !== 3) {
     await client.replyMessage(event.replyToken, {
       type: "text",
-      text: "📷 請依照順序操作，先輸入手機與卡號後再上傳照片喔！",
+      text: "⚠️ 請依照順序操作（先輸入手機與卡號後再上傳照片）。",
     });
     return;
   }
 
   try {
-    // 取得照片內容
     const messageId = event.message.id;
     const stream = await client.getMessageContent(messageId);
 
-    // 上傳照片至 Cloudinary
-    const upload = await new Promise((resolve, reject) => {
+    console.log("📤 開始上傳照片到 Cloudinary...");
+
+    // 將 LINE 的 stream 明確轉為 Cloudinary 可用 Buffer
+    const chunks = [];
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks);
+
+    const uploadResult = await cloudinary.uploader.upload_stream;
+    const photoUpload = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
           folder: "member_photos",
           public_id: `member_${m.id}_${Date.now()}`,
           overwrite: true,
         },
-        (err, result) => (err ? reject(err) : resolve(result))
+        (err, result) => {
+          if (err) {
+            console.error("❌ Cloudinary 上傳錯誤：", err);
+            reject(err);
+          } else {
+            console.log("✅ Cloudinary 上傳成功:", result.secure_url);
+            resolve(result);
+          }
+        }
       );
-      stream.pipe(uploadStream);
+      uploadStream.end(buffer);
     });
 
-    const photoUrl = upload.secure_url;
-
-    // 更新照片
+    const photoUrl = photoUpload.secure_url;
     await pool.query("UPDATE members SET photo_url=$1 WHERE id=$2", [photoUrl, m.id]);
 
-    // 產生 QR Code
+    // === 產生 QR Code ===
     const memberUrl = `${BASE_URL}/member/${m.id}`;
     const qrBuffer = await QRCode.toBuffer(memberUrl, { width: 300, margin: 2 });
 
     const qrUpload = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
+      const uploadStream = cloudinary.uploader.upload_stream(
         {
           folder: "line_qrcodes",
           public_id: `member_${m.id}`,
           overwrite: true,
         },
         (err, result) => (err ? reject(err) : resolve(result))
-      ).end(qrBuffer);
+      );
+      uploadStream.end(qrBuffer);
     });
 
-    // 更新 DB 狀態與 QR URL
     await pool.query(
       "UPDATE members SET qrcode=$1, registration_step=0 WHERE id=$2",
       [qrUpload.secure_url, m.id]
     );
 
-    // 回覆完成訊息
+    console.log("✅ 已為會員", m.id, "產生 QR：", qrUpload.secure_url);
+
     await client.replyMessage(event.replyToken, [
       { type: "text", text: "📸 照片上傳成功！" },
       { type: "text", text: "✅ 註冊完成，以下是您的會員 QR Code 👇" },
@@ -310,16 +323,13 @@ if (msgType === "image") {
         originalContentUrl: qrUpload.secure_url,
         previewImageUrl: qrUpload.secure_url,
       },
-      {
-        type: "text",
-        text: "您可隨時在主選單點選「我的資訊」查看資料 🙌",
-      },
+      { type: "text", text: "您可隨時點選主選單的「我的資訊」查看資料 🙌" },
     ]);
   } catch (err) {
-    console.error("❌ 照片上傳失敗：", err);
+    console.error("❌ 上傳流程失敗：", err);
     await client.replyMessage(event.replyToken, {
       type: "text",
-      text: "❌ 上傳發生錯誤，請再試一次或稍後再試。",
+      text: "❌ 上傳照片時發生錯誤，請稍後再試。",
     });
   }
   return;
