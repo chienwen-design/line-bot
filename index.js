@@ -286,18 +286,119 @@ async function handleMessage(event) {
 // === 掃碼頁面 ===
 app.get("/scanner", (req, res) => {
   res.send(`
-<html><head><meta charset="utf-8"><title>會員掃碼驗證</title>
-<style>body{text-align:center;font-family:'Noto Sans TC';padding-top:80px;}input{font-size:20px;width:80%;}</style>
-</head><body><h1>📷 會員掃碼驗證</h1>
-<p>請掃描 QR Code</p><input id="scannerInput" autofocus />
-<div id="result"></div>
+<html>
+<head>
+<meta charset="utf-8">
+<title>會員掃碼驗證</title>
+<style>
+body {
+  font-family: 'Noto Sans TC', sans-serif;
+  text-align: center;
+  background: #f8f9fa;
+  padding-top: 60px;
+}
+input {
+  font-size: 20px;
+  padding: 10px;
+  width: 80%;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+}
+#result {
+  margin-top: 40px;
+  font-size: 20px;
+}
+.member-card {
+  display: inline-block;
+  padding: 20px;
+  border-radius: 16px;
+  background: white;
+  box-shadow: 0 0 10px rgba(0,0,0,0.1);
+}
+.member-card img {
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  object-fit: cover;
+  margin-top: 10px;
+}
+.fade-out {
+  opacity: 0;
+  transition: opacity 1s ease-out;
+}
+</style>
+</head>
+<body>
+  <h1>📷 會員掃碼驗證</h1>
+  <p>請掃描 QR Code（或輸入網址後按 Enter）</p>
+  <input id="scannerInput" autofocus />
+  <div id="result"></div>
+
 <script>
-const input=document.getElementById("scannerInput");const result=document.getElementById("result");
-const speak=(t)=>{const m=new SpeechSynthesisUtterance(t);m.lang='zh-TW';speechSynthesis.speak(m)};
-input.addEventListener("keypress",async(e)=>{if(e.key==="Enter"){const url=input.value.trim();input.value="";result.innerHTML="⏳ 驗證中...";const res=await fetch("/api/check-member?url="+encodeURIComponent(url));const d=await res.json();if(d.success){result.innerHTML="✅ "+d.name+" ("+d.card_number+")<br><img src='"+d.photo_url+"' width=150>";speak("會員通過");}else{result.innerHTML="❌ "+d.message;speak("非會員，拒絕通過");}}});
-</script></body></html>
+const input = document.getElementById("scannerInput");
+const result = document.getElementById("result");
+
+// 語音播報
+const speak = (text) => {
+  const msg = new SpeechSynthesisUtterance(text);
+  msg.lang = 'zh-TW';
+  speechSynthesis.speak(msg);
+};
+
+// 顯示結果
+const showResult = (html, speakText, autoClear = true) => {
+  result.innerHTML = html;
+  if (speakText) speak(speakText);
+
+  // ✅ 自動 5 秒清空畫面
+  if (autoClear) {
+    setTimeout(() => {
+      result.classList.add("fade-out");
+      setTimeout(() => {
+        result.innerHTML = "";
+        result.classList.remove("fade-out");
+      }, 1000);
+    }, 5000);
+  }
+};
+
+input.addEventListener("keypress", async (e) => {
+  if (e.key === "Enter") {
+    const url = input.value.trim();
+    input.value = "";
+    showResult("⏳ 驗證中...", null, false);
+
+    try {
+      const res = await fetch("/api/check-member?url=" + encodeURIComponent(url));
+      const data = await res.json();
+
+      if (data.success) {
+        showResult(
+          \`
+          <div class="member-card">
+            <h2>✅ 會員通過</h2>
+            <p><strong>\${data.name}</strong></p>
+            <p>卡號：\${data.card_number}</p>
+            <img src="\${data.photo_url || 'https://cdn-icons-png.flaticon.com/512/149/149071.png'}" alt="會員照片" />
+          </div>
+          \`,
+          \`會員 \${data.name} 通過\`
+        );
+      } else {
+        showResult("<h2 style='color:red;'>❌ " + data.message + "</h2>", "非會員，拒絕通過");
+      }
+    } catch (err) {
+      showResult("<h2 style='color:red;'>伺服器錯誤</h2>", "系統錯誤");
+    }
+  }
+});
+</script>
+</body>
+</html>
 `);
 });
+
+
 
 // === API: 掃碼驗證 ===
 app.get("/api/check-member", async (req, res) => {
@@ -308,7 +409,7 @@ app.get("/api/check-member", async (req, res) => {
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
   const result = await pool.query("SELECT * FROM members WHERE id=$1", [id]);
   const member = result.rows[0];
-  if (!member) return res.json({ success: false, message: "查無會員" });
+  if (!member) return res.json({ success: false, message: "查無會員，請先掃QR碼加入..." });
   await pool.query("INSERT INTO scan_logs (member_id, member_name, card_number, ip_address) VALUES ($1,$2,$3,$4)", [member.id, member.name, member.card_number, ip]);
   res.json({ success: true, name: member.name, card_number: member.card_number, photo_url: member.photo_url });
 });
