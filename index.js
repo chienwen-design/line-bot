@@ -202,7 +202,7 @@ async function handleMessage(event) {
   const userId = event.source.userId;
   const msgType = event.message.type;
   const msgText = event.message.text?.trim();
-  console.log("📥 [Debug] message:", msgType, msgText, "step:", member?.registration_step);
+  
   if (msgType !== "text") return; // 僅處理文字訊息
 
   // === 手動指令：重新註冊 ===
