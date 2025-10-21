@@ -111,8 +111,10 @@ async function handleFollow(event) {
   const profile = await client.getProfile(userId);
   const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
   if (result.rows.length === 0) {
-    await pool.query("INSERT INTO members (line_user_id, name) VALUES ($1,$2)", [userId, profile.displayName]);
-  }
+    await pool.query("INSERT INTO members (line_user_id, name, registration_step) VALUES ($1,$2,1)", [userId, profile.displayName]);
+  } 
+}
+
   await client.replyMessage(event.replyToken, [
     { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
     { type: "text", text: "請輸入您的手機號碼（例如：0912345678）開始註冊。" },
