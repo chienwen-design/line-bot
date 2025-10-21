@@ -113,7 +113,6 @@ async function handleFollow(event) {
   if (result.rows.length === 0) {
     await pool.query("INSERT INTO members (line_user_id, name, registration_step) VALUES ($1,$2,1)", [userId, profile.displayName]);
   } 
-}
 
   await client.replyMessage(event.replyToken, [
     { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
