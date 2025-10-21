@@ -109,16 +109,37 @@ app.post("/webhook", middleware(config), async (req, res) => {
 async function handleFollow(event) {
   const userId = event.source.userId;
   const profile = await client.getProfile(userId);
-  const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
-  if (result.rows.length === 0) {
-    await pool.query("INSERT INTO members (line_user_id, name, registration_step) VALUES ($1,$2,1)", [userId, profile.displayName]);
-  } 
 
+  // 查詢是否已存在該會員
+  const result = await pool.query("SELECT * FROM members WHERE line_user_id=$1", [userId]);
+
+  if (result.rows.length === 0) {
+    // 🆕 新會員：建立新資料
+    await pool.query(
+      "INSERT INTO members (line_user_id, name, registration_step) VALUES ($1,$2,1)",
+      [userId, profile.displayName]
+    );
+
+    console.log(`✅ 新會員註冊開始: ${profile.displayName}`);
+  } else {
+    // 🔁 舊會員重新加入：清空舊資料
+    await pool.query(
+      `UPDATE members 
+       SET phone=NULL, card_number=NULL, qrcode=NULL, photo_url=NULL, registration_step=1, last_active=NOW()
+       WHERE line_user_id=$1`,
+      [userId]
+    );
+
+    console.log(`🔄 會員重新加入，重設資料: ${profile.displayName}`);
+  }
+
+  // 統一回覆訊息
   await client.replyMessage(event.replyToken, [
-    { type: "text", text: `👋 歡迎加入會員，${profile.displayName}！` },
-    { type: "text", text: "請輸入您的手機號碼（例如：0912345678）開始註冊。" },
+    { type: "text", text: `👋 歡迎回來，${profile.displayName}！` },
+    { type: "text", text: "請輸入您的手機號碼（例如：0912345678）重新開始註冊。" },
   ]);
 }
+
 
 // === Postback 事件 ===
 async function handlePostback(event) {
